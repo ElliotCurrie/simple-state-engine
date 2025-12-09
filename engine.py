@@ -5,34 +5,35 @@ from typing import Dict, Any, List
 import zmq.asyncio
 
 
-# ============================================================
-# Windows loop fix
-# ============================================================
+# Use selector event loop on Windows
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 # ============================================================
-# SharedState with schema enforcement + new naming
+# SharedState:
+#   - Maintains an in-memory table of records
+#   - Enforces a fixed schema
+#   - Supports full-state replacement, record CRUD,
+#     optional max_length truncation, and versioning
 # ============================================================
 class SharedState:
-    def __init__(self, name: str):
+    def __init__(self, name: str, max_length: int | None = None):
         self.name = name
+        self.max_length = max_length
         self.records: Dict[int, Dict[str, Any]] = {}
         self.lock = asyncio.Lock()
         self.version = 0
-        self.schema = None        # set of field names including "id"
-        self.persist = None       # async callback: await persist(state_name, delta)
+        self.schema = None
+        self.persist = None  # Async persistence callback
 
-    # ----------------------------------------------------------
-    # Schema helpers
-    # ----------------------------------------------------------
+    # ------------------------------
+    # Schema management
+    # ------------------------------
     def _infer_schema(self, record: dict):
-        """Set schema based on first record."""
         self.schema = set(record.keys()) | {"id"}
 
     def _validate_full_schema(self, record: dict):
-        """Ensure record matches schema exactly."""
         incoming = set(record.keys())
         if incoming != self.schema:
             missing = self.schema - incoming
@@ -40,25 +41,31 @@ class SharedState:
             raise ValueError(f"Schema mismatch. Missing={missing}, Extra={extra}")
 
     def _validate_patch_schema(self, changes: dict):
-        """Ensure PATCH does not introduce new fields."""
         illegal = set(changes.keys()) - self.schema
         if illegal:
-            raise ValueError(f"PATCH attempted unknown fields: {illegal}")
+            raise ValueError(f"PATCH contains unknown fields: {illegal}")
 
-    # ----------------------------------------------------------
-    # SET_STATE (replace whole state)
-    # ----------------------------------------------------------
+    # ------------------------------
+    # Replace entire state
+    # ------------------------------
     async def set_state(self, records: List[dict]):
         async with self.lock:
             if not records:
                 self.records.clear()
                 self.version += 1
-                return
+                return {"accepted": 0, "dropped": 0}
+
+            dropped = 0
+
+            # Apply max_length truncation if enabled
+            if self.max_length is not None and len(records) > self.max_length:
+                dropped = len(records) - self.max_length
+                records = records[:self.max_length]
 
             normalized = []
             seen_ids = set()
 
-            # Determine schema from first record (ignoring id)
+            # Schema inference or validation
             first = dict(records[0])
             first_fields = set(first.keys()) - {"id"}
 
@@ -69,17 +76,18 @@ class SharedState:
                 if first_fields != expected:
                     missing = expected - first_fields
                     extra = first_fields - expected
-                    raise ValueError(f"SET_STATE schema mismatch. Missing={missing}, Extra={extra}")
+                    raise ValueError(
+                        f"SET_STATE schema mismatch. Missing={missing}, Extra={extra}"
+                    )
 
-            # Assign IDs and validate fields
+            # Normalization + ID assignment
             next_id = 1
-
             for rec in records:
                 rec = dict(rec)
-
-                # assign ID if missing
                 rid = rec.get("id")
+
                 if rid is None:
+                    # Auto-assign sequential IDs
                     while next_id in seen_ids:
                         next_id += 1
                     rid = next_id
@@ -91,37 +99,46 @@ class SharedState:
                         raise ValueError(f"Duplicate id {rid} in SET_STATE")
                     seen_ids.add(rid)
 
-                # validate schema
                 self._validate_full_schema(rec)
                 normalized.append(rec)
 
-            # replace state
+            # Commit new state
             self.records = {rec["id"]: rec for rec in normalized}
             self.version += 1
 
             if self.persist:
-                await self.persist(self.name, {"set_state": len(normalized)})
+                await self.persist(self.name, {
+                    "set_state": len(normalized),
+                    "dropped": dropped
+                })
 
-    # ----------------------------------------------------------
-    # CREATE_RECORD
-    # ----------------------------------------------------------
+            return {"accepted": len(normalized), "dropped": dropped}
+
+    # ------------------------------
+    # Create a single record
+    # ------------------------------
     async def create_record(self, record: dict) -> int:
         async with self.lock:
+            if self.max_length is not None and len(self.records) >= self.max_length:
+                raise ValueError(
+                    f"State '{self.name}' has reached max_length ({self.max_length})"
+                )
+
             rec = dict(record)
 
-            # First insert sets schema
+            # Schema inference or validation
             if self.schema is None:
                 self._infer_schema(rec)
             else:
                 incoming = set(rec.keys()) | {"id"} if "id" not in rec else set(rec.keys())
-                missing = self.schema - incoming
-                extra = incoming - self.schema
-                if missing or extra:
+                if incoming != self.schema:
+                    missing = self.schema - incoming
+                    extra = incoming - self.schema
                     raise ValueError(
                         f"CREATE_RECORD schema mismatch. Missing={missing}, Extra={extra}"
                     )
 
-            # auto-assign ID if missing
+            # Assign ID if missing
             rid = rec.get("id")
             if rid is None:
                 rid = max(self.records.keys(), default=0) + 1
@@ -131,7 +148,6 @@ class SharedState:
                 if rid in self.records:
                     raise ValueError(f"Record id {rid} already exists")
 
-            # insert
             self.records[rid] = rec
             self.version += 1
 
@@ -140,9 +156,9 @@ class SharedState:
 
             return rid
 
-    # ----------------------------------------------------------
-    # SET_RECORD (full replace)
-    # ----------------------------------------------------------
+    # ------------------------------
+    # Replace a single record
+    # ------------------------------
     async def set_record(self, record_id: int, record: dict):
         async with self.lock:
             rec = dict(record)
@@ -161,9 +177,9 @@ class SharedState:
 
             return True
 
-    # ----------------------------------------------------------
-    # PATCH_RECORD
-    # ----------------------------------------------------------
+    # ------------------------------
+    # Patch a record
+    # ------------------------------
     async def patch_record(self, record_id: int, changes: dict):
         rec = self.records.get(record_id)
         if not rec:
@@ -173,7 +189,7 @@ class SharedState:
             raise ValueError("Cannot PATCH before schema is defined")
 
         changes = dict(changes)
-        changes.pop("id", None)  # id is immutable
+        changes.pop("id", None)
 
         self._validate_patch_schema(changes)
 
@@ -181,13 +197,15 @@ class SharedState:
         self.version += 1
 
         if self.persist:
-            await self.persist(self.name, {"patch_record": {"id": record_id, **changes}})
+            await self.persist(self.name, {
+                "patch_record": {"id": record_id, **changes}
+            })
 
         return True
 
-    # ----------------------------------------------------------
-    # DELETE_RECORD
-    # ----------------------------------------------------------
+    # ------------------------------
+    # Delete a record
+    # ------------------------------
     async def delete_record(self, record_id: int):
         async with self.lock:
             if record_id in self.records:
@@ -200,9 +218,9 @@ class SharedState:
                 return True
             return False
 
-    # ----------------------------------------------------------
-    # GET / LIST
-    # ----------------------------------------------------------
+    # ------------------------------
+    # Read operations
+    # ------------------------------
     async def get_record(self, record_id: int):
         return self.records.get(record_id)
 
@@ -213,18 +231,27 @@ class SharedState:
     def get_schema(self):
         return sorted(self.schema) if self.schema else None
 
+    def get_state_info(self):
+        return {
+            "name": self.name,
+            "max_length": self.max_length,
+            "current_length": len(self.records),
+            "schema": self.get_schema(),
+            "version": self.version,
+        }
+
 
 # ============================================================
-# Registry
+# Registry for multiple states
 # ============================================================
 class StateRegistry:
     def __init__(self):
         self.states: Dict[str, SharedState] = {}
 
-    def create(self, name: str):
+    def create(self, name: str, max_length: int | None = None):
         if name in self.states:
             raise ValueError(f"State '{name}' already exists")
-        st = SharedState(name)
+        st = SharedState(name, max_length=max_length)
         st.persist = persist_to_db
         self.states[name] = st
         return st
@@ -247,22 +274,22 @@ registry = StateRegistry()
 
 
 # ============================================================
-# Persistence hook (fill this in later with DB logic)
+# Persistence hook (user-implemented)
 # ============================================================
 async def persist_to_db(state_name: str, delta: dict):
     print(f"[PERSIST] state={state_name} delta={delta}")
 
 
 # ============================================================
-# ZMQ router
+# ZMQ command router
 # ============================================================
 async def handle_message(msg: dict) -> dict:
     cmd = (msg.get("cmd") or "").upper()
 
-    # --- State operations ---
+    # State management
     if cmd == "CREATE_STATE":
-        st = registry.create(msg["state"])
-        return {"status": "ok", "created": msg["state"]}
+        st = registry.create(msg["state"], msg.get("max_length"))
+        return {"status": "ok", "created": msg["state"], "max_length": st.max_length}
 
     if cmd == "DELETE_STATE":
         registry.delete(msg["state"])
@@ -271,11 +298,15 @@ async def handle_message(msg: dict) -> dict:
     if cmd == "LIST_STATES":
         return {"status": "ok", "states": registry.list()}
 
+    if cmd == "GET_STATE_INFO":
+        st = registry.get(msg["state"])
+        return {"status": "ok", **st.get_state_info()}
+
     if cmd == "GET_SCHEMA":
         st = registry.get(msg["state"])
         return {"status": "ok", "schema": st.get_schema()}
 
-    # --- Require a state below this point ---
+    # Remaining commands require an existing state
     if "state" not in msg:
         return {"status": "error", "message": "Missing 'state' field"}
 
@@ -284,42 +315,35 @@ async def handle_message(msg: dict) -> dict:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-    # --- SET_STATE ---
+    # State operations
     if cmd == "SET_STATE":
-        data = msg.get("data") or []
-        await st.set_state(data)
-        return {"status": "ok", "count": len(data)}
+        info = await st.set_state(msg.get("data") or [])
+        return {"status": "ok", **info}
 
-    # --- CREATE_RECORD ---
     if cmd == "CREATE_RECORD":
         new_id = await st.create_record(msg["data"])
         return {"status": "ok", "id": new_id}
 
-    # --- SET_RECORD ---
     if cmd == "SET_RECORD":
         rid = int(msg["id"])
         await st.set_record(rid, msg["data"])
         return {"status": "ok"}
 
-    # --- PATCH_RECORD ---
     if cmd == "PATCH_RECORD":
         rid = int(msg["id"])
         ok = await st.patch_record(rid, msg["data"])
         return {"status": "ok", "patched": ok}
 
-    # --- DELETE_RECORD ---
     if cmd == "DELETE_RECORD":
         rid = int(msg["id"])
         ok = await st.delete_record(rid)
         return {"status": "ok", "deleted": ok}
 
-    # --- GET_RECORD ---
     if cmd == "GET_RECORD":
         rid = int(msg["id"])
         rec = await st.get_record(rid)
         return {"status": "ok", "record": rec}
 
-    # --- LIST_RECORDS ---
     if cmd == "LIST_RECORDS":
         recs = await st.list_records()
         return {"status": "ok", "records": recs}
@@ -328,7 +352,7 @@ async def handle_message(msg: dict) -> dict:
 
 
 # ============================================================
-# Main loop
+# Main daemon loop
 # ============================================================
 async def main():
     ctx = zmq.asyncio.Context()
