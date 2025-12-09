@@ -1,4 +1,26 @@
 # Simple State Engine
+
+### Command Reference
+
+| Command          | Description | Required Fields | Notes |
+|------------------|-------------|------------------|-------|
+| `CREATE_STATE`   | Creates a new named state. | `state`, optional `max_length` | State starts empty. Throws error if already exists. |
+| `DELETE_STATE`   | Deletes an existing state. | `state` | State and all records are removed. |
+| `LIST_STATES`    | Returns all state names. | *(none)* | Useful for dashboards or debugging. |
+| `GET_STATE_INFO` | Returns schema, version, size, max_length. | `state` | Does not include actual records. |
+| `GET_SCHEMA`     | Returns inferred schema for a state. | `state` | Schema is inferred after first write. |
+| `SET_STATE`      | Atomically replaces entire state. | `state`, `data` (list) | Truncates to `max_length` if necessary. Defines schema if none exists. |
+| `CREATE_RECORD`  | Inserts a new record. | `state`, `data` (dict) | Auto-assigns ID if missing. Rejects if at `max_length`. |
+| `SET_RECORD`     | Replaces a record entirely. | `state`, `id`, `data` | Must match schema exactly (including `id`). |
+| `PATCH_RECORD`   | Partially updates a record. | `state`, `id`, `data` | Cannot introduce unknown fields. |
+| `DELETE_RECORD`  | Removes a record. | `state`, `id` | No error if record does not exist. |
+| `GET_RECORD`     | Fetches one record. | `state`, `id` | Returns null if missing. |
+| `LIST_RECORDS`   | Returns all records. | `state` | Locked during copy to avoid inconsistency. |
+
+---
+
+## Description
+
 A lightweight, schema-enforced, in-memory data store for Python.  
 Think of it as a tiny cross-platform Redis with tables, CRUD operations, and optional ZMQ transport —  
 all in a single script and with zero external infrastructure.
