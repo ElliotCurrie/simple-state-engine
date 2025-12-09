@@ -105,21 +105,21 @@ This tutorial walks through how to use the Simple State Engine end-to-end:
 
 Run the daemon:
 
-\`\`\`bash
+```bash
 python shared_state.py
-\`\`\`
+```
 
 Expected output:
 
-\`\`\`
+```
 [STATE DAEMON] Running at tcp://127.0.0.1:5560
-\`\`\`
+```
 
 ---
 
 ## 2. Connect With a Python Client
 
-\`\`\`python
+```python
 import zmq
 
 ctx = zmq.Context()
@@ -129,25 +129,25 @@ sock.connect("tcp://127.0.0.1:5560")
 def call(payload):
     sock.send_json(payload)
     return sock.recv_json()
-\`\`\`
+```
 
 ---
 
 ## 3. Create a State
 
-\`\`\`python
+```python
 call({
     "cmd": "CREATE_STATE",
     "state": "leads",
     "max_length": 1000
 })
-\`\`\`
+```
 
 ---
 
 ## 4. Load Data With `SET_STATE`
 
-\`\`\`python
+```python
 call({
     "cmd": "SET_STATE",
     "state": "leads",
@@ -156,107 +156,107 @@ call({
         {"name": "Bob",   "status": "open"}
     ]
 })
-\`\`\`
+```
 
 Example response:
 
-\`\`\`json
+```json
 { "status": "ok", "accepted": 2, "dropped": 0 }
-\`\`\`
+```
 
 Schema inferred:
 
-\`\`\`
+```
 ["id", "name", "status"]
-\`\`\`
+```
 
 ---
 
 ## 5. Create a Record
 
-\`\`\`python
+```python
 call({
     "cmd": "CREATE_RECORD",
     "state": "leads",
     "data": {"name": "Charlie", "status": "open"}
 })
-\`\`\`
+```
 
 Response:
 
-\`\`\`json
+```json
 { "status": "ok", "id": 3 }
-\`\`\`
+```
 
 ---
 
 ## 6. Retrieve a Record
 
-\`\`\`python
+```python
 call({
     "cmd": "GET_RECORD",
     "state": "leads",
     "id": 3
 })
-\`\`\`
+```
 
 ---
 
 ## 7. Update a Record (`PATCH_RECORD`)
 
-\`\`\`python
+```python
 call({
     "cmd": "PATCH_RECORD",
     "state": "leads",
     "id": 3,
     "data": {"status": "closed"}
 })
-\`\`\`
+```
 
 Invalid example:
 
-\`\`\`json
+```json
 {
   "status": "error",
   "message": "PATCH contains unknown fields: {'priority'}"
 }
-\`\`\`
+```
 
 ---
 
 ## 8. Replace a Record (`SET_RECORD`)
 
-\`\`\`python
+```python
 call({
     "cmd": "SET_RECORD",
     "state": "leads",
     "id": 2,
     "data": {"id": 2, "name": "Bob", "status": "archived"}
 })
-\`\`\`
+```
 
 ---
 
 ## 9. List All Records
 
-\`\`\`python
+```python
 call({
     "cmd": "LIST_RECORDS",
     "state": "leads"
 })
-\`\`\`
+```
 
 ---
 
 ## 10. Delete a Record
 
-\`\`\`python
+```python
 call({
     "cmd": "DELETE_RECORD",
     "state": "leads",
     "id": 1
 })
-\`\`\`
+```
 
 ---
 
@@ -264,53 +264,53 @@ call({
 
 ### Create a capped state
 
-\`\`\`python
+```python
 call({
     "cmd": "CREATE_STATE",
     "state": "campaign",
     "max_length": 1500
 })
-\`\`\`
+```
 
 ### `SET_STATE` truncates oversized data
 
-\`\`\`python
+```python
 call({
     "cmd": "SET_STATE",
     "state": "campaign",
     "data": big_list
 })
-\`\`\`
+```
 
 Example response:
 
-\`\`\`json
+```json
 { "status": "ok", "accepted": 1500, "dropped": 132 }
-\`\`\`
+```
 
 ### `CREATE_RECORD` fails when full
 
-\`\`\`json
+```json
 {
   "status": "error",
   "message": "State 'campaign' has reached max_length (1500)"
 }
-\`\`\`
+```
 
 ---
 
 ## 12. Inspect State Metadata
 
-\`\`\`python
+```python
 call({
     "cmd": "GET_STATE_INFO",
     "state": "leads"
 })
-\`\`\`
+```
 
 Example response:
 
-\`\`\`json
+```json
 {
   "status": "ok",
   "name": "leads",
@@ -319,7 +319,7 @@ Example response:
   "schema": ["id", "name", "status"],
   "version": 7
 }
-\`\`\`
+```
 
 ---
 
@@ -327,11 +327,11 @@ Example response:
 
 Define a persistence callback:
 
-\`\`\`python
+```python
 async def persist_to_db(state_name, delta):
     # Write to Postgres, SQLite, JSON, etc.
     ...
-\`\`\`
+```
 
 ---
 
